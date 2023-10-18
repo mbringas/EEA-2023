@@ -1,0 +1,341 @@
+---
+title: "Trabajo Práctico 1"
+author: "Mauro Bringas"
+date: "2023-9-20"
+output: html_document
+---
+
+## Importamos librerias
+```{r}
+library(recipes)
+library(corrplot)
+library(corrr)
+library(dplyr)
+library(tidyverse)
+library(rsample)
+library(GGally)
+library(robust)
+library(magrittr)
+library(tidymodels) 
+```
+## Carga de datos
+```{r}
+eph_train0 <- read.csv("eph_train_2022.csv")
+```
+
+#Leer el dataset
+Leer el archivo “eph_train_2022.csv”. ¿Qué puede mencionar sobre su estructura y variables?
+
+```{r}
+
+glimpse(eph_train0)
+
+```
+
+El dataset tiene 18 variables. Un código de identificacion, el año y trimestre al cual corresponde el registro son atributos identificatorios de este tipo de datasets.
+
+La region, variable de tipo caracter, y el aglomerado, numérica, hacen referencia a la ubicacion del caso registrado.
+
+La fecha de nacimiento, edad, asistencia al sistema educativo, el último nivel educativo alcanzado, el alfabetismo y el sexo son caracteristicas demográficas.
+
+En tercera instancia tenemos características de su actividad laboral, como ser el código de actividad, la categoria de la ocupación, la experiencia laboral y el salario horario.
+
+En este trabajo el salario horario será nuestra variable objetivo. Nos sacaremos de encima las variables identificatorias
+
+```{r}
+eph_train <- eph_train0 %>% select(-c(codigo_actividad,codusu,aglomerado))
+```
+
+Evaluamos si hay valores faltantes
+```{r}
+
+eph_train_vert <- eph_train %>% select(where(is.numeric),sexo) %>% pivot_longer(.,col=-c(sexo),names_to = "variables",values_to = "valores") %>% select(-c(sexo))
+
+eph_train_vert %>% gather(., 
+                                            key = "variables", 
+                                            value = "valores") %>% # agrupamos por las variables del set
+                                      group_by(variables) %>% 
+                                      summarise(valores_unicos = n_distinct(valores),
+                                      porcentaje_faltantes = sum(is.na(valores))/nrow(eph_train_vert)*100) %>% 
+                                      arrange(desc(porcentaje_faltantes), valores_unicos)  
+
+```
+
+
+**¿Cómo es la correlación entre las variables numéricas? Utilice y analice en detalle algún gráfico que sirva
+para sacar conclusiones sobre la asociación de variables realizando apertura por sexo.
+En particular, ¿Cómo es la correlación entre la variable a explicar (salario_horario) y el resto de las variables numéricas?**
+
+```{r}
+eph_train %>% 
+  select(where(is.numeric),sexo) %>% # desestimamos algunas variables
+  mutate(sexo = factor(sexo)) %>%  
+  ggpairs(., mapping = aes(colour = sexo), title = "Matriz de correlaciones",
+          upper = list(continuous = wrap("cor", size = 3, hjust=0.5)), legend = 25) + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle=45, vjust=0.5), legend.position = "bottom")
+```
+
+Para explorar más explicitamente las correlaciones
+
+```{r}
+M <- eph_train %>% select(where(is.numeric)) %>% select(-c(ano4,trimestre))  %>% 
+                    correlate(.) %>%  rplot()
+```
+
+
+#El resultado del modelo lineal otorga dos parametros cuya significacion se corrobora
+# con un p valor menor a 10^-10. la ordenada al origen  indica que el salario por hora esperado para
+# los individuos sin experiencia laboral es de 480.18. Por otro lado, La pendiente indica que por cada año
+# adicional de experiencia, el salario por hora esperado de una persona crece en 1.86 pesos.
+
+# 2. Modelo en funcion de la experiencia laboral y de la experiencia laboral cuadrada
+
+
+```{r}
+mls_exp <- eph_train %>% lm(salario_horario~experiencia_potencial,.)
+mls_exp$residuals
+summary(mls_exp)
+```
+En este modelo la ordenada al origen indica que, en el caso de una persona sin experiencia potencial, el salario horario medio esperado es 480.18 pesos. Por otro lado, la pendiente sugiere que por cada año de experiencia laboral incrementada, el salario horario medio se incrementa en 1.87 pesos.
+
+Podemos ver que tanto la ordenada al origen como la pendiente tienen p-valores muy pequeños, asegurando que el modelo realizado es significativamente distinto de modelar este problema con una constante (y esa constante es distinta de cero).
+
+Al ser una regresion lineal simple tenemos la ventaja de que podemos graficar la variable a predecir en funcion de la covariable
+
+```{r}
+intercepto = mls_exp$coefficients[1]
+pendiente = mls_exp$coefficients[2]
+
+eph_train %>% ggplot(., aes(x = experiencia_potencial, y = salario_horario)) + 
+  geom_abline(intercept = intercepto, slope = pendiente, color="forestgreen") +
+  geom_point() + 
+  labs(title="Modelo Lineal Simple", x="Experiencia Potencial", y="Salario Horario") 
+```
+
+```{r}
+mls_exp_exp2 <- eph_train %>% mutate(exp2=experiencia_potencial**2) %>% lm(salario_horario~experiencia_potencial+exp2,.)
+
+summary(mls_exp_exp2)
+```
+
+El resultado del modelo lineal otorga tres parametros cuya significacion se corrobora
+ con un p valor menor a 10^-15. la ordenada al origen  indica que el salario por hora esperado para
+ los individuos sin experiencia laboral es de 387.72. Por otro lado, el término que acompaña a la experiencia 
+potencial lineal indica que pendiente indica que por cada año dicional de experiencia potencial el salario por
+hora esperado se incrementa en 12.16 pesos. El término cuadrático en cambio tiene signo negativo, lo cual indica 
+que existe un punto de inflexión para el comportamiento de la experiencia potencial. Este término es el análogo
+a la aceleración si hacemos una analogia entre tiempo-experiencia y salario por hora - altura en un tiro ertical.
+Para determinar cuál es el punto de inflexion pasamos esa expresión a la forma canónica de los polinomios de grado 2.
+salario_horario = -0.20301 * (experiencia_potencial-29.952)^2 + 69.85
+Esto muestra que el crecimiento de la esperanza de salario horario con la experiencia será creciente hasta
+los 29.952 años de experiencia y luego comenzará a decrecer.
+
+
+¿Cuál es el efecto sobre el salario horario esperado de un año más de experiencia laboral para una persona
+con 6 años de experiencia laboral? ¿Y para una persona con 35 años de experiencia laboral?
+  
+Miramos entonces la variación respecto del salario potencial (o sea, la derivada primera de la esperanza en salario 
+horario respecto de la experiencia potencial)
+
+${dsalario}over{dexperienciapotencial}=12.16103-0.20301*experienciaPotencial$
+
+En una persona con 6 años, aumentar un año modifica 10.94 pesos/hora y en una con 35 años, luego del punto de inflexión, la esperanza del salario horario tiene una variacion de 4.85 pesos/hora.
+
+
+```{r}
+
+intercepto = mls_exp_exp2$coefficients[1]
+pendiente = mls_exp_exp2$coefficients[2]
+segundo_orden =mls_exp_exp2$coefficients[3]
+
+eph_train %>% ggplot(., aes(x = experiencia_potencial, y = salario_horario)) + 
+  geom_abline(intercept = intercepto, slope = pendiente, color="forestgreen") +
+  geom_point() + 
+  labs(title="Modelo Lineal Simple", x="Experiencia Potencial", y="Salario Horario") 
+```
+
+*¿Cuál es la interpretación de las variables incluidas en el modelo? ¿Sus coeficientes son significativos? ¿El modelo resulta significativo para explicar el salario? ¿Qué porcentaje de la variabilidad explica el modelo?*
+
+En el modelo simple que solo incluye la experiencia laboral linealmente, la ordenada al origen es el valor esperado de salario horario para una persona sin experiencia potencial. El coeficiente que acompaña a la experiencia potencial representa la variacion en el valor medio esperado de salario horario.
+
+En el modelo que incluye la experiencia laboral al cuadrado, la interpretación de ambos coeficientes (que acompañan a experiencia potencial y experiencia potencial al cuadrado) debe realizarse al mismo tiempo, dado que estas covariables se mueven de forma totalmente correlacionada. De esta forma, podemos tomar en consideracion que la variacion en experiencia potencial no es igual para cualquier valor de experiencia potencial.
+
+#3) Modelo lineal múltiple
+Se plantea un primer modelo múltiple a partir de la ecuación de Mincer:
+  $E(SalarioHorario) = β_0 + β_1 AñosEducacion + β_2 ExperienciaPotencial + β_2 ExperienciaP otencial^2 +  β_3 Sexo + β_4 Sexo·AñosEducacion$
+
+Ajustar el modelo planteado y responder las siguientes preguntas: ¿Cuál es la interpretación de las variables
+incluidas en el modelo? ¿Sus coeficientes son significativos? ¿El modelo resulta significativo para explicar el
+salario? ¿Qué porcentaje de la variabilidad explica el modelo?
+Analizar en profundidad el cumplimiento de los supuestos del modelo lineal para este modelo
+
+```{r}
+mlm <- eph_train %>% mutate(exp2=experiencia_potencial**2) %>% lm(salario_horario~educacion+experiencia_potencial+exp2+sexo+sexo*educacion,.)
+summary(mlm)
+```
+
+REVISAR En este caso podemos ver que el p valor del modelo global da que es significativo, lo cual dice que este modelo difiere significativamente de modelar el salario horario con un aconstante.
+Interpretación:
+La ordenada al origen es el salario horario esperado para un individuo sin experiencia laboral, de sexo femenino y cero años de educacion informados.
+El coeficiente asociado a sexoVaron indica cuál es la diferencia en salario horario esperado para un individuo sin experiencia potencial ni educacion, considerando que su sexo es Varon.
+El coeficiente que acompaña a educacion representa el incremento en salario horario esperado por cada año de educacion incrementado, para un individuo de sexo femenino y a igualdad de condiciones de experiencia potencial.
+El coeficiente que acompaña al termino de interaccion educacion:sexoVaron representa cuánto más se modifica el sarlario horario esperado por cada año de educacion incrementado por encima de lo dicho para el termino que afecta a individuos de sexo femenino, dejando constante la experiencia potencial.
+El coeficiente que acompaña a experiencia y experiencia al cuadrado muestra cómo una variacion en experiencia potencial repercute sobre el salario horario esperado, dejando constante el resto de las covariables.
+
+No todos los coeficientes descritos son significativos (no existe evidencia suficiente para afirmar que son distintos de cero, a un nivel de confianza de 0.95), en particular educacion*sexoVaron tiene un pvalor de casi 0.3. Esto quiere decir que no existe suficiente evidencia para afirmar que la influencia de incrementar los años de educacion en varones, por sobre las mujeres, sea distinto de cero para cualquier nivel de confianza mayor que 70%.
+
+La introduccion de una variable categorica hace que podamos pensar modelos "distintos" para cada grupo. En este caso, al estar indicado sexoVaron en los coeficientes, notamos que la categoria de referencia es Mujer. Por esto, el modelo de las Mujeres tendra valor sexoVaron=0, y el modelo de varones sexoVaron=1.
+
+Pasando en limpio, el modelo de las mujeres es
+
+  $E(SalarioHorario) = β_0 + β_1 AñosEducacion + β_2 ExperienciaP otencial + β_2 ExperienciaP otencial^2 $
+  
+y el de los varones,
+
+  $E(SalarioHorario) = (β_0 + β_3) + (β_1 + β_4) AñosEducacion + β_2 ExperienciaP otencial + β_2 ExperienciaP otencial^2 $
+  
+En esta instancia vale la pena explicar qué implica que sea tan grande el p-valor del coeficiente β_4 (educacion para el sexo Varon): No es significativa la diferencia en la influencia de los años de educacion de los varones por sobre lo que se estima para las mujeres en el valor esperado del salario horario, a todas las otras variables fijas (en otras palabras, no existe suficiente evidencia para afirmar que  β_4 sea distinto de cero)
+
+##Cumplimiento de supuestos
+
+Debemos verificar
+
+-homocedasticidad de los residuos
+
+-Normalidad de los residuos
+
+-
+
+Para esto, utilizamos plot sobre el modelo lineal generado
+
+```{r}
+plot(mlm)
+
+```
+
+Del grafico de residuos versus valores predichos podemos ver que parece existir cierta estructura en los datos dado que hay una curvatura. A bajos y altos valores los residuos son positivos, mientras que en valores intermedios son negativos.
+
+Del Q-Q Plot de residuos estandarizados podemos ver que la distribucion se aleja bastante de la comparacion cuantil-a-cuantil con la distribucion N(0,1). Esto es Particularmente notable a valores de cuantiles teóricos altos. Esto viola el supuesto de normalidad de los residuos.
+
+Del grafico de apalancamiento potencial versus valores predichos podemos afirmar que no existen puntos potencialmente influyentes, dado que 0.5>0.012>hii observados.
+
+El diagnóstico para este modelo es: modelo no cumple con los supuestos del modelo lineal. Parecen existir dos problemas: violación del supuesto de linealidad de la esperanza condicional (residuos con estructura), falta de normalidad en los residuos(del Q-Q Plot).
+
+#4) Modelo de Mincer “enriquecido”
+
+Ahora, se procede a modelar según una especificación del modelo de Mincer con ciertas variables adicionales
+
+$E[ln(SalarioHorario)] = β0 + β1AñosEducacion + β2ExperienciaP otencial + β3ExperienciaP otencial2+ β4Sexo + β5Sexo · AñosEducacion$
+
+```{r}
+lmMincerEnriquecido <- eph_train %>%  lm(log(salario_horario) ~ educacion+experiencia_potencial+experiencia_potencial**2 + sexo +
+                            sexo*educacion,.)
+summary(lmMincerEnriquecido)
+```
+• ¿Cuál es la interpretación del coeficiente asociado a la variable de años de educación? ¿Se observan
+cambios en la significatividad individual de los coeficientes respecto al modelo anterior?
+
+Ahora la variable a modelar es el logaritmo del salario horario, y todo esto constituye un modelo semi elastico. En esta oportunidad, todos los coeficientes asociados a las distintas covariables resultan significativos incluso a niveles de coinfianza de 0.999.
+
+Al tener un modelo semielastico (Modelo Log-Nivel), la variable a explicar en forma logarítmica y las covariables en forma lineal, la interpretación del coeficiente se realiza de la siguiente manera:
+en particular para el caso de años de educacion, por cada año de incremento de la variable educacion, se tiene un cambio esperado de 9,16% el salario horario.
+semielasticidad de Y respecto a X. Se interpreta como: un incremento de una unidad en X está asociado a un cambio en el valor esperado de Y de (100·β)%.
+
+
+• ¿Qué porcentaje de la variabilidad del salario horario explica el modelo? ¿Cómo se compara con la
+variabilidad explicada por el modelo anterior?
+Nota: tenga en cuenta que la variable predicha es el logaritmo del salario horario y se pide el porcentaje
+de variabilidad explicada del salario horario. Además, como los dos modelos tienen la misma cantidad
+de covariables es posible compararlos mediante el el R-cuadrado simple
+
+#REVISAR ACA
+
+• Analizar en profundidad el cumplimiento de los supuestos del modelo lineal para este modelo y comparar
+con el análisis del modelo anterior
+
+
+"5) Modelos propios y evaluación
+Realizar 2 modelos lineales múltiples adicionales y explicar la lógica detrás de los mismos (se valorará la
+creación y/o inclusión de variables nuevas).
+Nota: No se pueden utilizar métodos de selección automática de variables dado que buscamos que analicen
+otras variables y realicen feature engineering.
+Evaluar y comparar la performance del modelo lineal multiple, el modelo de mincer y los modelos
+desarrollados en este punto en el dataset de entrenamiento y evaluación (usar dataset “eph_test_2022.csv”).
+La evaluación de performance consiste en comparar la performance en términos del RMSE y MAE sobre el
+set de entrenamiento y el set de evaluación.
+¿Cuál es el mejor modelo para el objetivo de predecir el salario horario? ¿Por qué?"
+
+```{r}
+lmPropio1 <- eph_train %>%  
+            mutate(zona = case_when(region == "Capital Federal" ~ "AMBA",
+                                    region == "Gran Buenos Aires" ~ "AMBA",
+                                    region == "Noreste" ~ "Norte",
+                                    region == "Noroeste" ~ "Norte",
+                                    region == "Patagonia" ~ "Sur",
+                                    region == "Pampeana" ~ "Centro")) %>% 
+            lm(salario_horario ~ educacion+experiencia_potencial+experiencia_potencial**2 +
+                                           sexo*educacion+zona,.)
+summary(lmPropio1)
+
+lmPropio1 <- eph_train %>%  
+            mutate(juventud_educada = edad/(educacion+1)) %>% 
+            lm(salario_horario ~ educacion+experiencia_potencial+experiencia_potencial**2 +
+                                           cat_cantidad_empleos,.)
+summary(lmPropio1)
+
+```
+
+Los dos modelos propuestos tienen los siguientes agregados:
+
+
+"6) Modelo lineal robusto
+Leer el archivo “eph_train_outliers_2022.csv”. Este último consiste en el dataset original de train con la
+incorporación de algunas observaciones adicionales que pueden incluir valores atípicos.
+Realizar dos gráficos del salario horario, uno para el dataset de entrenamiento sin outliers y otro para el
+dataset con outliers que permitan observar claramente la diferencia entre ambos sets de datos."
+
+```{r}
+eph_train_outliers <- read.csv("eph_train_outliers_2022.csv")
+```
+
+
+
+```{r}
+eph_train2 <- eph_train0
+eph_train_outliers2 <- eph_train_outliers
+eph_train2$type <- "WO_outliers"
+eph_train_outliers2$type <- "outliers"
+combined <- rbind(eph_train2,eph_train_outliers2) 
+rm(eph_train2,eph_train_outliers2)
+
+combinedPivot <- combined %>% select(where(is.numeric),type) %>% pivot_longer(.,cols=-c("type","ano4","trimestre","codigo_actividad","aglomerado"))
+```
+Armamos un dataset vertical con una flag que indica si provienen del dataset con o sin outliers
+
+```{r}
+ggplot(data = combinedPivot, aes(y = value, color = type)) +
+  geom_boxplot(alpha = 0.75) + # agregamos transparencia a los puntos
+  labs(title = "Salario horario") + 
+  facet_wrap(~ name, scales = "free")
+```
+
+"Podemos ver que los outliers aparecen en valores altos de salario_horario"
+
+```{r}
+combined_numeric <- combined %>% select(c("edad","educacion","experiencia_potencial","salario_horario","type")) 
+
+ggpairs(combined_numeric, mapping = aes(color = type,alpha = 0.4))
+```
+"Sobre este nuevo conjunto de datos entrenar el modelo lineal multiple, el modelo de mincer y un
+modelo robusto (misma especificación que el modelo lineal multiple). Comparar exhaustivamente los
+coeficientes estimados y su significatividad entre el modelo lineal multiple y el modelo robusto.
+Comparar la performance (RMSE y MAE) de los tres modelos entrenados en este punto en el dataset de
+entrenamiento (con outliers) y de evaluación ¿Qué puede concluir al respecto?"
+
+```{r}
+mlm_robusto <- eph_train_outliers %>% rlm(salario_horario~educacion+experiencia_potencial+experiencia_potencial**2
+                                                                  +sexo+sexo*educacion,.)
+summary(mlm_robusto)
+
+```
